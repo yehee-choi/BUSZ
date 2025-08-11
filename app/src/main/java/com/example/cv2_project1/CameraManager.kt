@@ -1,236 +1,254 @@
-// CameraManager.kt (OCR 완전 제거)
-
 package com.example.cv2_project1
 
-import android.annotation.SuppressLint
 import android.content.Context
-import android.content.pm.PackageManager
-import android.graphics.SurfaceTexture
-import android.hardware.camera2.*
-import android.os.Handler
-import android.os.HandlerThread
+import android.graphics.Bitmap
+import android.graphics.ImageFormat
+import android.graphics.Rect
+import android.graphics.YuvImage
+import android.speech.tts.TextToSpeech
 import android.util.Log
-import android.util.Size
-import android.view.Surface
-import android.view.TextureView
-import android.widget.Toast
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-import java.util.*
+import androidx.lifecycle.LifecycleOwner
+import kotlinx.coroutines.*
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 class CameraManager(
     private val context: Context,
-    private val textureView: TextureView
+    private val lifecycleOwner: LifecycleOwner,
+    private val previewView: PreviewView,
+    private val textToSpeech: TextToSpeech
 ) {
-
     private val TAG = "CameraManager"
 
-    private var cameraDevice: CameraDevice? = null
-    private var cameraCaptureSession: CameraCaptureSession? = null
-    private var captureRequestBuilder: CaptureRequest.Builder? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private var cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
 
-    private lateinit var backgroundThread: HandlerThread
-    private lateinit var backgroundHandler: Handler
+    // 객체 감지 매니저
+    private var objectDetectionManager: ObjectDetectionManager? = null
 
-    private val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
-    private var cameraId: String = ""
-    private var previewSize: Size = Size(1920, 1080)
+    // 감지 주기 제어
+    private val detectionScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private var isDetectionRunning = false
+    private val DETECTION_INTERVAL_MS = 3000L // 3초마다 객체 감지
 
-    private val textureListener = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
-            openCamera()
-        }
-
-        override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-
-        override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = false
-
-        override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-            // 단순 카메라 미리보기만 - OCR 제거로 성능 향상
-        }
-    }
+    // 프레임 처리 제어
+    private var isProcessingFrame = false
 
     init {
-        textureView.surfaceTextureListener = textureListener
+        initializeObjectDetection()
     }
 
-    private val stateCallback = object : CameraDevice.StateCallback() {
-        override fun onOpened(camera: CameraDevice) {
-            Log.d(TAG, "카메라 열림")
-            cameraDevice = camera
-            createCameraPreview()
-        }
-
-        override fun onDisconnected(camera: CameraDevice) {
-            Log.d(TAG, "카메라 연결 해제")
-            cameraDevice?.close()
-        }
-
-        override fun onError(camera: CameraDevice, error: Int) {
-            Log.e(TAG, "카메라 에러: $error")
-            cameraDevice?.close()
-            cameraDevice = null
+    private fun initializeObjectDetection() {
+        objectDetectionManager = ObjectDetectionManager(
+            context = context,
+            textToSpeech = textToSpeech
+        ) { detections ->
+            // 감지 결과 콜백
+            Log.d(TAG, "🔍 감지된 객체: ${detections.size}개")
         }
     }
-
     fun startCamera() {
-        startBackgroundThread()
-        if (textureView.isAvailable) {
-            openCamera()
-        } else {
-            textureView.surfaceTextureListener = textureListener
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+
+        cameraProviderFuture.addListener({
+            try {
+                cameraProvider = cameraProviderFuture.get()
+                bindCameraUseCases()
+                startObjectDetection()
+                Log.d(TAG, "📷 카메라 시작 성공")
+            } catch (e: Exception) {
+                Log.e(TAG, "💥 카메라 시작 실패", e)
+            }
+        }, ContextCompat.getMainExecutor(context))
+    }
+
+    private fun bindCameraUseCases() {
+        val cameraProvider = this.cameraProvider ?: return
+
+        // 프리뷰 설정
+        val preview = Preview.Builder()
+            .build()
+            .also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+
+        // 이미지 분석 설정 - 한 번만 설정
+        imageAnalysis = ImageAnalysis.Builder()
+            .setTargetResolution(android.util.Size(640, 480)) // 해상도 지정
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+            .also { analysis ->
+                analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                    processImageProxy(imageProxy)
+                }
+            }
+
+        // 카메라 선택 (후면 카메라)
+        val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+
+        try {
+            // 기존 바인딩 해제
+            cameraProvider.unbindAll()
+
+            // 카메라 바인딩
+            cameraProvider.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                imageAnalysis
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 카메라 바인딩 실패", e)
         }
     }
 
-    fun stopCamera() {
-        closeCamera()
-        stopBackgroundThread()
+    private fun startObjectDetection() {
+        if (isDetectionRunning) return
+
+        isDetectionRunning = true
+
+        detectionScope.launch {
+            while (isDetectionRunning) {
+                try {
+                    // 3초마다 객체 감지 허용
+                    delay(DETECTION_INTERVAL_MS)
+                    isProcessingFrame = false // 다음 프레임 처리 허용
+
+                } catch (e: Exception) {
+                    Log.e(TAG, "💥 객체 감지 중 오류", e)
+                    delay(1000) // 에러 시 1초 대기
+                }
+            }
+        }
+
+        Log.d(TAG, "🔍 객체 감지 시작 (${DETECTION_INTERVAL_MS/1000}초 간격)")
     }
 
-    @SuppressLint("MissingPermission")
-    private fun openCamera() {
-        // 권한 확인
-        if (!hasCameraPermission()) {
-            Log.e(TAG, "카메라 권한이 없습니다")
-            Toast.makeText(context, "카메라 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+    private fun processImageProxy(imageProxy: ImageProxy) {
+        // 프레임 처리 중이면 스킵
+        if (isProcessingFrame) {
+            imageProxy.close()
             return
         }
 
         try {
-            cameraId = setupCamera()
-            cameraManager.openCamera(cameraId, stateCallback, backgroundHandler)
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "카메라 접근 에러", e)
-            Toast.makeText(context, "카메라를 열 수 없습니다", Toast.LENGTH_SHORT).show()
+            // ImageProxy를 Bitmap으로 변환
+            val bitmap = imageProxyToBitmap(imageProxy)
+
+            if (bitmap != null) {
+                isProcessingFrame = true // 프레임 처리 시작
+
+                // 백그라운드 스레드에서 객체 감지 실행
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        objectDetectionManager?.detectObjects(bitmap)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "💥 객체 감지 실패", e)
+                    }
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 프레임 분석 실패", e)
+        } finally {
+            imageProxy.close()
         }
     }
 
-    private fun hasCameraPermission(): Boolean {
-        return ContextCompat.checkSelfPermission(
-            context,
-            android.Manifest.permission.CAMERA
-        ) == PackageManager.PERMISSION_GRANTED
-    }
+    // ✅ 수정된 ImageProxy to Bitmap 변환 함수
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+        return try {
+            val yBuffer = imageProxy.planes[0].buffer // Y
+            val vuBuffer = imageProxy.planes[2].buffer // VU
 
-    private fun setupCamera(): String {
-        for (cameraId in cameraManager.cameraIdList) {
-            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            val ySize = yBuffer.remaining()
+            val vuSize = vuBuffer.remaining()
 
-            // 후면 카메라 선택
-            val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
-            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+            val nv21 = ByteArray(ySize + vuSize)
 
-                val map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-                previewSize = chooseOptimalSize(
-                    map?.getOutputSizes(SurfaceTexture::class.java),
-                    textureView.width,
-                    textureView.height
+            yBuffer.get(nv21, 0, ySize)
+            vuBuffer.get(nv21, ySize, vuSize)
+
+            val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
+            val out = ByteArrayOutputStream()
+            yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 50, out)
+            val imageBytes = out.toByteArray()
+
+            android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 Bitmap 변환 실패", e)
+
+            // 대안: 간단한 RGB 변환 (품질은 낮지만 작동함)
+            try {
+                val bitmap = Bitmap.createBitmap(
+                    imageProxy.width,
+                    imageProxy.height,
+                    Bitmap.Config.ARGB_8888
                 )
 
-                return cameraId
-            }
-        }
-        return cameraManager.cameraIdList[0] // 기본값
-    }
+                // YUV_420_888을 간단하게 RGB로 변환
+                val yBuffer = imageProxy.planes[0].buffer
+                val yPixelStride = imageProxy.planes[0].pixelStride
+                val yRowStride = imageProxy.planes[0].rowStride
 
-    private fun chooseOptimalSize(choices: Array<Size>?, textureViewWidth: Int, textureViewHeight: Int): Size {
-        if (choices == null) return Size(1920, 1080)
+                val pixels = IntArray(imageProxy.width * imageProxy.height)
+                var pixelIndex = 0
 
-        val bigEnough = mutableListOf<Size>()
-        val notBigEnough = mutableListOf<Size>()
-
-        for (option in choices) {
-            if (option.width >= textureViewWidth && option.height >= textureViewHeight) {
-                bigEnough.add(option)
-            } else {
-                notBigEnough.add(option)
-            }
-        }
-
-        return when {
-            bigEnough.isNotEmpty() -> Collections.min(bigEnough) { lhs, rhs ->
-                (lhs.width * lhs.height).compareTo(rhs.width * rhs.height)
-            }
-            notBigEnough.isNotEmpty() -> Collections.max(notBigEnough) { lhs, rhs ->
-                (lhs.width * lhs.height).compareTo(rhs.width * rhs.height)
-            }
-            else -> choices[0]
-        }
-    }
-
-    private fun createCameraPreview() {
-        try {
-            val texture = textureView.surfaceTexture!!
-            texture.setDefaultBufferSize(previewSize.width, previewSize.height)
-
-            val surface = Surface(texture)
-            captureRequestBuilder = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
-            captureRequestBuilder!!.addTarget(surface)
-
-            cameraDevice!!.createCaptureSession(
-                Arrays.asList(surface),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(cameraCaptureSession: CameraCaptureSession) {
-                        if (cameraDevice == null) return
-
-                        this@CameraManager.cameraCaptureSession = cameraCaptureSession
-                        updatePreview()
+                for (y in 0 until imageProxy.height) {
+                    for (x in 0 until imageProxy.width) {
+                        val yIndex = y * yRowStride + x * yPixelStride
+                        if (yIndex < yBuffer.capacity()) {
+                            val yValue = yBuffer.get(yIndex).toInt() and 0xFF
+                            // Y 값을 그레이스케일로 변환
+                            val grayValue = yValue
+                            val rgb = (0xFF shl 24) or (grayValue shl 16) or (grayValue shl 8) or grayValue
+                            pixels[pixelIndex++] = rgb
+                        }
                     }
+                }
 
-                    override fun onConfigureFailed(cameraCaptureSession: CameraCaptureSession) {
-                        Log.e(TAG, "카메라 세션 구성 실패")
-                        Toast.makeText(context, "카메라 미리보기 설정 실패", Toast.LENGTH_SHORT).show()
-                    }
-                },
+                bitmap.setPixels(pixels, 0, imageProxy.width, 0, 0, imageProxy.width, imageProxy.height)
+                bitmap
+
+            } catch (e2: Exception) {
+                Log.e(TAG, "💥 대안 Bitmap 변환도 실패", e2)
                 null
-            )
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "카메라 미리보기 생성 에러", e)
-        }
-    }
-
-    private fun updatePreview() {
-        if (cameraDevice == null) return
-
-        captureRequestBuilder!!.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-
-        try {
-            cameraCaptureSession!!.setRepeatingRequest(
-                captureRequestBuilder!!.build(),
-                null,
-                backgroundHandler
-            )
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "카메라 미리보기 업데이트 에러", e)
-        }
-    }
-
-    private fun closeCamera() {
-        cameraCaptureSession?.close()
-        cameraCaptureSession = null
-
-        cameraDevice?.close()
-        cameraDevice = null
-    }
-
-    private fun startBackgroundThread() {
-        backgroundThread = HandlerThread("CameraBackground")
-        backgroundThread.start()
-        backgroundHandler = Handler(backgroundThread.looper)
-    }
-
-    private fun stopBackgroundThread() {
-        if (::backgroundThread.isInitialized) {
-            backgroundThread.quitSafely()
-            try {
-                backgroundThread.join()
-            } catch (e: InterruptedException) {
-                Log.e(TAG, "백그라운드 스레드 종료 에러", e)
             }
+        }
+    }
+
+    fun stopCamera() {
+        isDetectionRunning = false
+        cameraProvider?.unbindAll()
+        Log.d(TAG, "📷 카메라 중지")
+    }
+
+    fun pauseDetection() {
+        isDetectionRunning = false
+        Log.d(TAG, "⏸️ 객체 감지 일시정지")
+    }
+
+    fun resumeDetection() {
+        if (!isDetectionRunning) {
+            startObjectDetection()
+            Log.d(TAG, "▶️ 객체 감지 재시작")
         }
     }
 
     fun cleanup() {
-        closeCamera()
-        stopBackgroundThread()
+        isDetectionRunning = false
+        detectionScope.cancel()
+        cameraExecutor.shutdown()
+        objectDetectionManager?.cleanup()
+        cameraProvider?.unbindAll()
+        Log.d(TAG, "🧹 CameraManager 정리 완료")
     }
 }

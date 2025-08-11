@@ -62,7 +62,8 @@ dependencies {
     debugImplementation(libs.androidx.ui.test.manifest)
 
     // Android Core
-    implementation ("androidx.core:core-ktx:1.12.0")
+//    implementation ("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.core:core-ktx:1.8.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation ("androidx.activity:activity-ktx:1.8.2")
 
@@ -92,4 +93,16 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
     //Socket 의존성 추가
     implementation("io.socket:socket.io-client:2.0.1")
+
+    // TensorFlow Lite 의존성 추가
+    implementation("org.tensorflow:tensorflow-lite:2.13.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    implementation("org.tensorflow:tensorflow-lite-metadata:0.4.4")
+// 코루틴 (비동기 처리용)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.4")
+
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+    implementation("com.google.mlkit:text-recognition-korean:16.0.0")
+    implementation("com.google.mlkit:object-detection:17.0.0")
+
 }

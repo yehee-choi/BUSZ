@@ -21,13 +21,16 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var cameraManager: CameraManager
     private lateinit var speechManager: SpeechManager
-    private lateinit var textToSpeech: TextToSpeech
+     lateinit var textToSpeech: TextToSpeech
     private lateinit var locationManager: LocationManager
     private lateinit var webSocketManager: WebSocketManager
 
     // 음성 인식 결과를 UI에 전달하기 위한 상태
     private var speechResultCallback: ((String) -> Unit)? = null
     private var speechStatusCallback: ((Boolean) -> Unit)? = null
+    // ... 다른 콜백들
+    private var ocrResultCallback: ((String) -> Unit)? = null // MainScreen으로 OCR 결과 전달
+
 
     // 음성 인식 완료 상태
     private var speechCompleted = false
@@ -64,8 +67,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         // LocationManager 초기화
         locationManager = LocationManager(this)
 
-        // WebSocketManager 초기화 (Context 없이)
-        webSocketManager = WebSocketManager()
+        // WebSocketManager 초기화 (Context 전달)
+        webSocketManager = WebSocketManager(this)
 
         setContent {
             CV2_Project1Theme {
@@ -99,7 +102,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
-            // 웹소켓으로 데이터 전송
+            // Socket.IO로 데이터 전송 (이미 연결되어 있음)
             sendBusLocationToServer(result)
 
             // 음성 인식 완료 후 위치 추적 중지로 배터리 절약
@@ -107,12 +110,63 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 locationManager.stopLocationUpdates()
                 Log.d(TAG, "음성 인식 완료 - 위치 추적 중지")
             }
+
+            // 🚌 음성 인식 완료 후 카메라 및 객체 감지 시작
+            if (::cameraManager.isInitialized) {
+                cameraManager.startCamera()
+                Log.d(TAG, "🔍 음성 인식 완료 - 객체 감지 시작")
+            }
         }
+
+        // 🚀 앱 시작과 동시에 Socket.IO 서버 연결
+        connectToSocketIOServer()
 
         // 3초 후 자동 음성 인식 시작
         Handler(mainLooper).postDelayed({
             startAutoSpeechRecognition()
         }, 3000)
+    }
+
+    // 🚀 Socket.IO 서버 연결
+    private fun connectToSocketIOServer() {
+        Log.d(TAG, "🔌 앱 시작 - Socket.IO 서버 연결 시작")
+
+        webSocketManager.connect(
+            onStatusChanged = { isConnected ->
+                runOnUiThread {
+                    if (isConnected) {
+                        Log.d(TAG, "✅ Socket.IO 서버 연결 성공!")
+                        Toast.makeText(this@MainActivity, "서버 연결 완료", Toast.LENGTH_SHORT).show()
+
+                        // 파일 저장 테스트
+                        testFileSaving()
+                    } else {
+                        Log.e(TAG, "❌ Socket.IO 서버 연결 실패")
+                        Toast.makeText(this@MainActivity, "서버 연결 실패", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onVoiceOutput = { message ->
+                // UI 스레드에서 음성 출력
+                runOnUiThread {
+                    if (::textToSpeech.isInitialized) {
+                        textToSpeech.speak(message, TextToSpeech.QUEUE_FLUSH, null, "bus_info")
+                        Log.d(TAG, "🔊 TTS 실행: $message")
+                    }
+                }
+            }
+        )
+    }
+
+    // 파일 저장 테스트
+    private fun testFileSaving() {
+        Log.d(TAG, "📁 파일 저장 테스트 시작")
+        val content = webSocketManager.getResultFileContent()
+        if (content != null) {
+            Log.d(TAG, "📁 기존 파일 내용:\n$content")
+        } else {
+            Log.d(TAG, "📁 기존 파일 없음 또는 빈 파일")
+        }
     }
 
     private fun startAutoSpeechRecognition() {
@@ -168,11 +222,6 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // OCR 결과를 UI로 전달하는 메서드 - 제거됨
-    // fun onOCRResult(result: String) {
-    //     ocrResultCallback?.invoke(result)
-    // }
-
     // 서버 전송용 위치 정보 로그
     private fun logCurrentLocationForServer() {
         if (::locationManager.isInitialized) {
@@ -185,43 +234,24 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // MainActivity.kt에서 sendBusLocationToServer 메서드를 이렇게 수정하세요
-
+    // Socket.IO로 버스 위치 정보 전송 - 연결 시도 제거, 데이터만 전송
     private fun sendBusLocationToServer(speechResult: String) {
         val location = locationManager.getLocationForServer()
-        val lat = location?.first ?: 37.4219983
-        val lng = location?.second ?: -122.084
+        val lat = location?.first ?: 37.497928      // 기본값: 강남역 위도
+        val lng = location?.second ?: 127.027583    // 기본값: 강남역 경도
 
         val busNumber = extractBusNumber(speechResult)
 
         Log.d(TAG, "🚀 서버 전송 시작 - 버스: $busNumber, 위도: $lat, 경도: $lng")
+        Log.d(TAG, "🔍 Socket.IO 연결 상태: ${webSocketManager.isConnected}")
 
-        // WebSocket 상태 확인
-        Log.d(TAG, "🔍 WebSocket 연결 상태: ${webSocketManager.isConnected}")
-
-        // 웹소켓 연결 상태 확인 후 전송
-        if (!webSocketManager.isConnected) {
-            Log.d(TAG, "📡 웹소켓 연결 시도 중...")
-
-            webSocketManager.connect { connected ->
-                Log.d(TAG, "🔄 WebSocket 연결 콜백 실행됨 - 연결됨: $connected")
-
-                // UI 스레드에서 실행
-                runOnUiThread {
-                    if (connected) {
-                        Log.d(TAG, "✅ 웹소켓 연결 성공 - 데이터 전송 시작")
-                        Toast.makeText(this@MainActivity, "서버 연결 성공", Toast.LENGTH_SHORT).show()
-                        sendBusLocationData(lat, lng, busNumber)
-                    } else {
-                        Log.e(TAG, "❌ 웹소켓 연결 실패")
-                        Toast.makeText(this@MainActivity, "서버 연결 실패 (버스 $busNumber)", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        } else {
+        // 연결되어 있으면 바로 전송
+        if (webSocketManager.isConnected) {
             Log.d(TAG, "✅ 이미 연결됨 - 바로 전송")
-            // 이미 연결되어 있으면 바로 전송
             sendBusLocationData(lat, lng, busNumber)
+        } else {
+            Log.w(TAG, "⚠️ 소켓이 연결되지 않음 - 전송 실패")
+            Toast.makeText(this, "서버 연결 상태를 확인해주세요", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -230,10 +260,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         try {
             val success = webSocketManager.sendBusLocationRequest(
-                latitude = latitude,
-                longitude = longitude,
-                busNumber = busNumber,
-                interval = 30
+                latitude = latitude,        // GPS 위도
+                longitude = longitude,      // GPS 경도
+                busNumber = busNumber,      // 음성인식된 버스 번호
+                interval = 30              // 30초 간격
             )
 
             Log.d(TAG, "📤 전송 결과: $success")
@@ -241,7 +271,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             // UI 스레드에서 Toast 실행
             runOnUiThread {
                 if (success) {
-                    Log.d(TAG, "✅ 버스 위치 정보 전송 성공 - 버스: $busNumber, 위치: ($latitude, $longitude)")
+                    Log.d(TAG, "✅ 버스 위치 정보 전송 성공")
+                    Log.d(TAG, "✅ 전송된 데이터: 버스 $busNumber, 위치 ($latitude, $longitude)")
                     Toast.makeText(this@MainActivity, "✅ 버스 $busNumber 정보 전송 완료", Toast.LENGTH_SHORT).show()
                 } else {
                     Log.e(TAG, "❌ 버스 위치 정보 전송 실패")
@@ -256,31 +287,37 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // 음성에서 버스 번호 추출 (숫자 패턴 찾기)
+    // 음성에서 버스 번호 추출 (쉼표 처리 포함)
     private fun extractBusNumber(speechText: String): String {
+        // 1. 먼저 쉼표 제거 (구글 음성인식이 "9201"을 "9,201"로 인식하는 경우 대응)
+        val cleanedText = speechText.replace(",", "").replace("，", "") // 영문/한글 쉼표 모두 제거
+
+        Log.d(TAG, "쉼표 제거된 텍스트: $cleanedText (원본: $speechText)")
+
+        //버스 번호 판별(번호인지 아닌지)
         val patterns = listOf(
-            Regex("""(\d{3,4})번"""),           // "123번", "1234번"
-            Regex("""(\d{3,4})\s*번"""),        // "123 번"
-            Regex("""버스\s*(\d{3,4})"""),      // "버스 123"
-            Regex("""(\d{3,4})\s*버스"""),      // "123 버스"
-            Regex("""(\d{3,4})""")              // 단순 숫자만
+            Regex("""(\d{1,4})번"""),
+            Regex("""(\d{1,4})\s*번"""),
+            Regex("""버스\s*(\d{1,4})"""),
+            Regex("""(\d{1,4})\s*버스"""),
+            Regex("""\b(\d{1,4})\b""")
         )
 
         for (pattern in patterns) {
-            val match = pattern.find(speechText)
+            val match = pattern.find(cleanedText)
             if (match != null) {
                 val busNumber = match.groupValues[1]
 
-                // 🎯 버스 번호 유효성 검사 (3-4자리 숫자)
-                if (busNumber.length >= 3 && busNumber.length <= 4 && busNumber.toIntOrNull() != null) {
-                    Log.d(TAG, "유효한 버스 번호 추출: $busNumber (원본: $speechText)")
+                // 버스 번호 유효성 검사 (1-4자리 숫자)
+                if (busNumber.length >= 1 && busNumber.length <= 4 && busNumber.toIntOrNull() != null) {
+                    Log.d(TAG, "유효한 버스 번호 추출: $busNumber (정제된 텍스트: $cleanedText)")
                     return busNumber
                 }
             }
         }
 
-        Log.d(TAG, "버스 번호를 찾을 수 없음: $speechText")
-        return "" // 유효한 버스 번호가 없으면 빈 문자열 반환
+        Log.d(TAG, "버스 번호를 찾을 수 없음: $cleanedText")
+        return "0000" // 유효한 버스 번호가 없으면 기본값 반환
     }
 
     private fun checkAndRequestPermissions() {
@@ -305,9 +342,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             }
         }
 
-        // 카메라는 음성 인식 완료 후에만 시작
+        // 🔍 카메라는 음성 인식 완료 후에만 시작 (객체 감지 포함)
         if (speechCompleted && ::cameraManager.isInitialized) {
             cameraManager.startCamera()
+            Log.d(TAG, "🔍 음성 인식 완료됨 - 카메라 및 객체 감지 시작")
         }
     }
 
@@ -315,6 +353,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         super.onPause()
         if (::cameraManager.isInitialized) {
             cameraManager.stopCamera()
+            Log.d(TAG, "🔍 카메라 및 객체 감지 중지")
         }
         if (::locationManager.isInitialized) {
             locationManager.stopLocationUpdates()
