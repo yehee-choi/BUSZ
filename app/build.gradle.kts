@@ -90,4 +90,6 @@ dependencies {
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+    //Socket 의존성 추가
+    implementation("io.socket:socket.io-client:2.0.1")
 }

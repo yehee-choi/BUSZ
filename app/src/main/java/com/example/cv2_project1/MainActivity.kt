@@ -185,7 +185,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // 웹소켓으로 버스 위치 정보 전송 (즉시 실행)
+    // MainActivity.kt에서 sendBusLocationToServer 메서드를 이렇게 수정하세요
+
     private fun sendBusLocationToServer(speechResult: String) {
         val location = locationManager.getLocationForServer()
         val lat = location?.first ?: 37.4219983
@@ -195,24 +196,38 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         Log.d(TAG, "🚀 서버 전송 시작 - 버스: $busNumber, 위도: $lat, 경도: $lng")
 
+        // WebSocket 상태 확인
+        Log.d(TAG, "🔍 WebSocket 연결 상태: ${webSocketManager.isConnected}")
+
         // 웹소켓 연결 상태 확인 후 전송
         if (!webSocketManager.isConnected) {
-            Log.d(TAG, "웹소켓 연결 시도 중...")
+            Log.d(TAG, "📡 웹소켓 연결 시도 중...")
+
             webSocketManager.connect { connected ->
-                if (connected) {
-                    sendBusLocationData(lat, lng, busNumber)
-                } else {
-                    Log.e(TAG, "웹소켓 연결 실패 - 로그로만 기록")
-                    Toast.makeText(this, "서버 연결 실패 (로그 확인: 버스 $busNumber)", Toast.LENGTH_SHORT).show()
+                Log.d(TAG, "🔄 WebSocket 연결 콜백 실행됨 - 연결됨: $connected")
+
+                // UI 스레드에서 실행
+                runOnUiThread {
+                    if (connected) {
+                        Log.d(TAG, "✅ 웹소켓 연결 성공 - 데이터 전송 시작")
+                        Toast.makeText(this@MainActivity, "서버 연결 성공", Toast.LENGTH_SHORT).show()
+                        sendBusLocationData(lat, lng, busNumber)
+                    } else {
+                        Log.e(TAG, "❌ 웹소켓 연결 실패")
+                        Toast.makeText(this@MainActivity, "서버 연결 실패 (버스 $busNumber)", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         } else {
+            Log.d(TAG, "✅ 이미 연결됨 - 바로 전송")
             // 이미 연결되어 있으면 바로 전송
             sendBusLocationData(lat, lng, busNumber)
         }
     }
 
     private fun sendBusLocationData(latitude: Double, longitude: Double, busNumber: String) {
+        Log.d(TAG, "📤 sendBusLocationData 호출됨 - 버스: $busNumber")
+
         try {
             val success = webSocketManager.sendBusLocationRequest(
                 latitude = latitude,
@@ -221,16 +236,23 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 interval = 30
             )
 
-            if (success) {
-                Log.d(TAG, "✅ 버스 위치 정보 전송 성공 - 버스: $busNumber, 위치: ($latitude, $longitude)")
-                Toast.makeText(this, "✅ 버스 $busNumber 정보 전송 완료", Toast.LENGTH_SHORT).show()
-            } else {
-                Log.e(TAG, "❌ 버스 위치 정보 전송 실패")
-                Toast.makeText(this, "❌ 서버 전송 실패", Toast.LENGTH_SHORT).show()
+            Log.d(TAG, "📤 전송 결과: $success")
+
+            // UI 스레드에서 Toast 실행
+            runOnUiThread {
+                if (success) {
+                    Log.d(TAG, "✅ 버스 위치 정보 전송 성공 - 버스: $busNumber, 위치: ($latitude, $longitude)")
+                    Toast.makeText(this@MainActivity, "✅ 버스 $busNumber 정보 전송 완료", Toast.LENGTH_SHORT).show()
+                } else {
+                    Log.e(TAG, "❌ 버스 위치 정보 전송 실패")
+                    Toast.makeText(this@MainActivity, "❌ 서버 전송 실패", Toast.LENGTH_SHORT).show()
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "서버 전송 중 예외 발생", e)
-            Toast.makeText(this, "전송 오류: ${e.message}", Toast.LENGTH_SHORT).show()
+            Log.e(TAG, "❌ 서버 전송 중 예외 발생", e)
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "전송 오류: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
