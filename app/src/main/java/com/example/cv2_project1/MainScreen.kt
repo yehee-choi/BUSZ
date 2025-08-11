@@ -1,8 +1,8 @@
-
 package com.example.cv2_project1
 
 import android.content.pm.PackageManager
-import androidx.core.content.ContextCompat
+import androidx.core.content.ContextCompat// MainScreen.kt (수정됨)
+
 
 import android.view.TextureView
 import androidx.activity.ComponentActivity
@@ -45,8 +45,8 @@ fun MainScreen(
 
     // 상태에 따른 UI 업데이트
     val statusText = when {
-        speechCompleted -> "음성 인식 완료"
-        isListening -> "음성을 듣고 있습니다..."
+        speechCompleted -> "서버 전송 완료"
+        isListening -> "버스 번호를 말씀해주세요..."
         else -> "음성 인식 준비 중..."
     }
 
@@ -169,7 +169,7 @@ fun MainScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = "✓ 완료",
+                            text = "✅ 전송완료",
                             color = Color.White,
                             fontSize = 18.sp,
                             fontWeight = FontWeight.Bold

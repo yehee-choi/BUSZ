@@ -116,9 +116,22 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun startAutoSpeechRecognition() {
+        Log.d(TAG, "자동 음성 인식 시작 시도 - speechCompleted: $speechCompleted")
+
         if (!speechCompleted && ::speechManager.isInitialized) {
-            speechStatusCallback?.invoke(true)
-            speechManager.startSpeechRecognition()
+            // 권한 재확인
+            if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+
+                speechStatusCallback?.invoke(true)
+                speechManager.startSpeechRecognition()
+                Log.d(TAG, "음성 인식 시작됨")
+            } else {
+                Log.e(TAG, "음성 인식 시작 실패 - 마이크 권한 없음")
+                Toast.makeText(this, "마이크 권한을 확인해주세요", Toast.LENGTH_LONG).show()
+            }
+        } else {
+            Log.w(TAG, "음성 인식 시작 불가 - speechCompleted: $speechCompleted, speechManager initialized: ${::speechManager.isInitialized}")
         }
     }
 
@@ -172,7 +185,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // 웹소켓으로 버스 위치 정보 전송
+    // 웹소켓으로 버스 위치 정보 전송 (즉시 실행)
     private fun sendBusLocationToServer(speechResult: String) {
         val location = locationManager.getLocationForServer()
         val lat = location?.first ?: 37.4219983
@@ -180,8 +193,45 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         val busNumber = extractBusNumber(speechResult)
 
-        Log.d(TAG, "전송할 데이터 - 버스: $busNumber, 위도: $lat, 경도: $lng")
-        Toast.makeText(this, "버스 $busNumber 정보 처리 완료", Toast.LENGTH_SHORT).show()
+        Log.d(TAG, "🚀 서버 전송 시작 - 버스: $busNumber, 위도: $lat, 경도: $lng")
+
+        // 웹소켓 연결 상태 확인 후 전송
+        if (!webSocketManager.isConnected) {
+            Log.d(TAG, "웹소켓 연결 시도 중...")
+            webSocketManager.connect { connected ->
+                if (connected) {
+                    sendBusLocationData(lat, lng, busNumber)
+                } else {
+                    Log.e(TAG, "웹소켓 연결 실패 - 로그로만 기록")
+                    Toast.makeText(this, "서버 연결 실패 (로그 확인: 버스 $busNumber)", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            // 이미 연결되어 있으면 바로 전송
+            sendBusLocationData(lat, lng, busNumber)
+        }
+    }
+
+    private fun sendBusLocationData(latitude: Double, longitude: Double, busNumber: String) {
+        try {
+            val success = webSocketManager.sendBusLocationRequest(
+                latitude = latitude,
+                longitude = longitude,
+                busNumber = busNumber,
+                interval = 30
+            )
+
+            if (success) {
+                Log.d(TAG, "✅ 버스 위치 정보 전송 성공 - 버스: $busNumber, 위치: ($latitude, $longitude)")
+                Toast.makeText(this, "✅ 버스 $busNumber 정보 전송 완료", Toast.LENGTH_SHORT).show()
+            } else {
+                Log.e(TAG, "❌ 버스 위치 정보 전송 실패")
+                Toast.makeText(this, "❌ 서버 전송 실패", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "서버 전송 중 예외 발생", e)
+            Toast.makeText(this, "전송 오류: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     // 음성에서 버스 번호 추출 (숫자 패턴 찾기)
@@ -198,12 +248,17 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             val match = pattern.find(speechText)
             if (match != null) {
                 val busNumber = match.groupValues[1]
-                Log.d(TAG, "추출된 버스 번호: $busNumber (원본: $speechText)")
-                return busNumber
+
+                // 🎯 버스 번호 유효성 검사 (3-4자리 숫자)
+                if (busNumber.length >= 3 && busNumber.length <= 4 && busNumber.toIntOrNull() != null) {
+                    Log.d(TAG, "유효한 버스 번호 추출: $busNumber (원본: $speechText)")
+                    return busNumber
+                }
             }
         }
 
-        return speechText // 숫자가 없으면 원본 텍스트 반환
+        Log.d(TAG, "버스 번호를 찾을 수 없음: $speechText")
+        return "" // 유효한 버스 번호가 없으면 빈 문자열 반환
     }
 
     private fun checkAndRequestPermissions() {
