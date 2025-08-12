@@ -38,11 +38,11 @@ class ObjectDetectionManager(
     // OCR 텍스트 인식기 (한국어 지원)
     private val textRecognizer = TextRecognition.getClient(KoreanTextRecognizerOptions.Builder().build())
 
-    // 모델 설정
-    private val INPUT_SIZE = 640  // COCO
-    private val NUM_CLASSES = 80  // COCO 데이터셋 클래스 수
-    private val NUM_DETECTIONS = 6300  // 예측 결과 수
-    private val CONFIDENCE_THRESHOLD = 0.5f
+    // 모델 설정 - 커스텀 버스 감지 모델
+    private val INPUT_SIZE = 640
+    private val NUM_CLASSES = 1  // 버스만 학습했으므로 클래스 1개
+    private val NUM_DETECTIONS = 6300  // YOLO 기본값
+    private val CONFIDENCE_THRESHOLD = 0.3f
 
     // 바운딩 박스 그리기용 Paint
     private val paint = Paint().apply {
@@ -52,23 +52,74 @@ class ObjectDetectionManager(
         textSize = 40f
     }
 
-    // 마지막 버스 번호 발표 시간 (중복 방지)
+    // 음성 출력 제어
+    private var lastGeneralAnnouncementTime = 0L
     private var lastBusAnnouncementTime = 0L
-    private val BUS_ANNOUNCEMENT_INTERVAL = 5000L // 5초 간격
+    private val GENERAL_ANNOUNCEMENT_INTERVAL = 7000L
+    private val BUS_ANNOUNCEMENT_INTERVAL = 5000L
+
+    private var lastAnnouncedBusNumber: String? = null
+    private var detectionCount = 0
 
     init {
         loadModel()
         loadLabels()
+        Log.d(TAG, "🔊 TTS 초기화 상태 확인...")
+        testTTSOutput()
     }
-    private fun loadModel() {
+
+    private fun testTTSOutput() {
         try {
-            val modelFile = loadModelFile("models/best_full_integer_quant.tflite")
-            interpreter = Interpreter(modelFile)
-            Log.d(TAG, "✅ TensorFlow Lite 모델 로드 성공")
+            Log.d(TAG, "🔊 TTS 테스트 시작")
+            textToSpeech.speak("객체 감지 매니저 초기화 완료", TextToSpeech.QUEUE_ADD, null, "init_test")
         } catch (e: Exception) {
-            Log.e(TAG, "💥 모델 로드 실패", e)
+            Log.e(TAG, "❌ TTS 테스트 실패", e)
         }
     }
+
+    private fun loadModel() {
+        try {
+            Log.d(TAG, "📁 모델 파일 로드 시도: models/best_full_integer_quant.tflite")
+
+            try {
+                val assetManager = context.assets
+                val modelsFiles = assetManager.list("models")
+                Log.d(TAG, "📁 models 폴더 파일 목록: ${modelsFiles?.joinToString(", ") ?: "폴더 없음"}")
+
+                if (modelsFiles?.contains("best_full_integer_quant.tflite") == true) {
+                    Log.d(TAG, "✅ 모델 파일 존재 확인됨")
+                } else {
+                    Log.e(TAG, "❌ 모델 파일이 목록에 없음")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "💥 assets 폴더 확인 실패", e)
+            }
+
+            val modelFile = loadModelFile("models/best_full_integer_quant.tflite")
+            Log.d(TAG, "📊 모델 파일 크기: ${modelFile.capacity()} bytes")
+
+            interpreter = Interpreter(modelFile)
+            Log.d(TAG, "✅ TensorFlow Lite 모델 로드 성공")
+
+            Log.d(TAG, "📊 입력 텐서 수: ${interpreter!!.inputTensorCount}")
+            Log.d(TAG, "📊 출력 텐서 수: ${interpreter!!.outputTensorCount}")
+
+            if (interpreter!!.inputTensorCount > 0) {
+                val inputShape = interpreter!!.getInputTensor(0).shape()
+                Log.d(TAG, "📊 입력 형태: ${inputShape.joinToString("x")}")
+            }
+
+        } catch (e: java.io.FileNotFoundException) {
+            Log.e(TAG, "💥 모델 파일을 찾을 수 없음", e)
+        } catch (e: java.io.IOException) {
+            Log.e(TAG, "💥 모델 파일 읽기 실패", e)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "💥 모델 파일 형식 오류", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 모델 로드 중 알 수 없는 오류", e)
+        }
+    }
+
     private fun loadModelFile(modelPath: String): MappedByteBuffer {
         val fileDescriptor = context.assets.openFd(modelPath)
         val inputStream = FileInputStream(fileDescriptor.fileDescriptor)
@@ -77,80 +128,164 @@ class ObjectDetectionManager(
         val declaredLength = fileDescriptor.declaredLength
         return fileChannel.map(FileChannel.MapMode.READ_ONLY, startOffset, declaredLength)
     }
+
     private fun loadLabels() {
+        // 버스만 학습한 커스텀 모델이므로 라벨은 "bus" 하나만
+        labels = listOf("bus")
+        Log.d(TAG, "✅ 커스텀 버스 모델 라벨 설정: ${labels.size}개 클래스 (버스만)")
+
+        /*
+        // 원래 COCO 라벨 로드 코드 (사용 안함)
         try {
             labels = context.assets.open("models/coco_labels.txt").bufferedReader().readLines()
             Log.d(TAG, "✅ 라벨 파일 로드 성공: ${labels.size}개 클래스")
         } catch (e: Exception) {
             Log.e(TAG, "💥 라벨 파일 로드 실패, 기본 라벨 사용", e)
-            // COCO 데이터셋 기본 라벨 (일부)
-            labels = listOf(
-                "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
-                "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
-                "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
-                "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee"
-                // ... 더 많은 라벨들
-            )
+            labels = listOf("bus") // 버스만
         }
+        */
     }
 
     fun detectObjects(bitmap: Bitmap): List<Detection> {
-        val interpreter = this.interpreter ?: return emptyList()
+        detectionCount++
+        Log.d(TAG, "🔍 === 객체 감지 #${detectionCount} 시작 ===")
+        Log.d(TAG, "🔍 이미지 크기: ${bitmap.width}x${bitmap.height}")
+        Log.d(TAG, "🔍 인터프리터 상태: ${if (interpreter != null) "로드됨" else "null"}")
+
+        val interpreter = this.interpreter
+        if (interpreter == null) {
+            Log.w(TAG, "⚠️ 모델이 로드되지 않음 - 실제 감지 불가")
+            return createTestDetections(bitmap)
+        }
 
         try {
-            // 1. 이미지 전처리
-            val resizedBitmap = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, false)
+            Log.d(TAG, "🔍 실제 TensorFlow Lite 모델로 객체 감지 시작")
+
+            Log.d(TAG, "🔍 원본 이미지: ${bitmap.width}x${bitmap.height}")
+
+            val resizedBitmap = if (bitmap.width != INPUT_SIZE || bitmap.height != INPUT_SIZE) {
+                Log.d(TAG, "🔍 이미지 리사이즈: ${bitmap.width}x${bitmap.height} → ${INPUT_SIZE}x${INPUT_SIZE}")
+                Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
+            } else {
+                Log.d(TAG, "🔍 이미지 크기 적합 - 리사이즈 건너뛰기")
+                bitmap
+            }
+
+            Log.d(TAG, "🔍 최종 이미지: ${resizedBitmap.width}x${resizedBitmap.height}")
+
             val inputBuffer = convertBitmapToByteBuffer(resizedBitmap)
+            Log.d(TAG, "🔍 이미지 전처리 완료")
 
-            // 2. 모델 추론
-            val outputArray = Array(1) { Array(NUM_DETECTIONS) { FloatArray(NUM_CLASSES + 5) } }
-            interpreter.run(inputBuffer, outputArray)
+            val startTime = System.currentTimeMillis()
 
-            // 3. 결과 후처리
-            val detections = parseModelOutput(outputArray[0], bitmap.width, bitmap.height)
+            // ✅ 모델 출력 텐서 정보 확인
+            val outputTensor0 = interpreter.getOutputTensor(0)
+            val outputTensor1 = interpreter.getOutputTensor(1)
 
-            // 4. 버스 감지 시 OCR 실행
-            processBusDetections(bitmap, detections)
+            Log.d(TAG, "🔍 출력 텐서 0 형태: ${outputTensor0.shape().joinToString("x")}")
+            Log.d(TAG, "🔍 출력 텐서 1 형태: ${outputTensor1.shape().joinToString("x")}")
 
-            // 5. 일반 객체 음성 출력 (버스 제외)
-            announceNonBusObjects(detections)
+            // ✅ 실제 출력 텐서 크기에 맞춰 버퍼 할당
+            val outputBuffer1 = ByteBuffer.allocateDirect(outputTensor0.numBytes())
+            outputBuffer1.order(ByteOrder.nativeOrder())
 
-            // 6. 콜백 호출
-            onDetectionResult?.invoke(detections)
+            val outputBuffer2 = ByteBuffer.allocateDirect(outputTensor1.numBytes())
+            outputBuffer2.order(ByteOrder.nativeOrder())
 
-            Log.d(TAG, "🔍 객체 감지 완료: ${detections.size}개 객체 발견")
-            return detections
+            Log.d(TAG, "🔍 출력 버퍼1 할당: ${outputBuffer1.capacity()} bytes")
+            Log.d(TAG, "🔍 출력 버퍼2 할당: ${outputBuffer2.capacity()} bytes")
 
+            val outputs = mapOf(
+                0 to outputBuffer1,
+                1 to outputBuffer2
+            )
+
+            Log.d(TAG, "🔍 모델 추론 시작 (INT8 양자화 모델)...")
+            interpreter.runForMultipleInputsOutputs(arrayOf(inputBuffer), outputs)
+            val endTime = System.currentTimeMillis()
+
+            Log.d(TAG, "🔍 모델 추론 완료: ${endTime - startTime}ms")
+
+            val detections = parseQuantizedModelOutput(outputBuffer1, outputBuffer2, bitmap.width, bitmap.height)
+
+            Log.d(TAG, "🔍 실제 모델 감지 완료: 총 ${detections.size}개 객체")
+
+            return processDetections(detections, bitmap)
+
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "💥 텐서 크기 불일치 오류", e)
+            return createTestDetections(bitmap)
         } catch (e: Exception) {
-            Log.e(TAG, "💥 객체 감지 실패", e)
-            return emptyList()
+            Log.e(TAG, "💥 객체 감지 실행 중 기타 오류", e)
+            return createTestDetections(bitmap)
         }
     }
 
-    private fun processBusDetections(originalBitmap: Bitmap, detections: List<Detection>) {
+    private fun createTestDetections(originalBitmap: Bitmap): List<Detection> {
+        Log.w(TAG, "⚠️ 모델 파일이 없습니다 - 실제 감지를 수행할 수 없음")
+        return emptyList()
+    }
+
+    private fun processDetections(detections: List<Detection>, originalBitmap: Bitmap): List<Detection> {
+        if (detections.isNotEmpty()) {
+            val detectionSummary = detections.groupBy { it.label }.mapValues { it.value.size }
+            Log.d(TAG, "📊 감지된 객체 요약: $detectionSummary")
+        }
+
+        // 버스 전용 모델이므로 모든 감지 결과가 버스
+        val busDetections = detections  // 모든 감지 결과가 버스
+        if (busDetections.isNotEmpty()) {
+            Log.d(TAG, "🚌 버스 감지됨! ${busDetections.size}대")
+            processBusDetections(busDetections, originalBitmap)
+        } else {
+            Log.d(TAG, "🔍 버스 감지 안됨")
+        }
+
+        // 일반 객체는 없으므로 announceNonBusObjects 호출 안함
+
+        if (detections.isEmpty()) {
+            Log.d(TAG, "🔍 감지된 버스 없음")
+            if (detectionCount % 6 == 0) {
+                Log.d(TAG, "🔊 테스트 음성: 버스 없음")
+                speakWithTest("주변에 버스가 감지되지 않았습니다", "no_bus_test")
+            }
+        }
+
+        onDetectionResult?.invoke(detections)
+        return detections
+    }
+
+    private fun processBusDetections(busDetections: List<Detection>, originalBitmap: Bitmap) {
         val currentTime = System.currentTimeMillis()
 
-        // 중복 발표 방지
         if (currentTime - lastBusAnnouncementTime < BUS_ANNOUNCEMENT_INTERVAL) {
+            Log.d(TAG, "🚌 버스 음성 스킵 - ${(currentTime - lastBusAnnouncementTime) / 1000}초 경과")
             return
         }
 
-        val busDetections = detections.filter { it.label == "bus" }
+        Log.d(TAG, "🚌 버스 감지 처리 시작 - ${busDetections.size}대의 버스")
 
-        if (busDetections.isNotEmpty()) {
-            Log.d(TAG, "🚌 버스 감지됨! OCR로 번호 추출 시작")
+        val sortedBuses = busDetections.sortedByDescending { it.confidence }
 
-            for (busDetection in busDetections) {
-                // 버스 영역만 크롭
-                val croppedBitmap = cropBitmapToBoundingBox(originalBitmap, busDetection.boundingBox)
+        for ((index, busDetection) in sortedBuses.withIndex()) {
+            Log.d(TAG, "🚌 버스 #${index + 1} OCR 진행 중 (신뢰도: ${String.format("%.2f", busDetection.confidence)})")
 
-                if (croppedBitmap != null) {
-                    // OCR로 텍스트 추출
-                    extractBusNumber(croppedBitmap)
-                    lastBusAnnouncementTime = currentTime
-                    break // 첫 번째 버스만 처리
-                }
-            }
+            extractBusNumberFromDetection(busDetection, originalBitmap, index + 1)
+            lastBusAnnouncementTime = currentTime
+            break
+        }
+    }
+
+    private fun extractBusNumberFromDetection(busDetection: Detection, originalBitmap: Bitmap, busIndex: Int) {
+        Log.d(TAG, "🔍 버스 #${busIndex} OCR 시작 - 바운딩 박스: ${busDetection.boundingBox}")
+
+        val croppedBitmap = cropBitmapToBoundingBox(originalBitmap, busDetection.boundingBox)
+
+        if (croppedBitmap != null) {
+            Log.d(TAG, "🖼️ 버스 영역 크롭 성공: ${croppedBitmap.width}x${croppedBitmap.height}")
+            extractBusNumber(croppedBitmap, busIndex)
+        } else {
+            Log.w(TAG, "🖼️ 버스 #${busIndex} 이미지 크롭 실패")
         }
     }
 
@@ -161,9 +296,12 @@ class ObjectDetectionManager(
             val width = minOf(bitmap.width - left, (boundingBox.width()).toInt())
             val height = minOf(bitmap.height - top, (boundingBox.height()).toInt())
 
-            if (width > 0 && height > 0) {
-                Bitmap.createBitmap(bitmap, left, top, width, height)
+            if (width > 20 && height > 20) {
+                val croppedBitmap = Bitmap.createBitmap(bitmap, left, top, width, height)
+                Log.d(TAG, "🖼️ 이미지 크롭 성공: ${width}x${height}")
+                croppedBitmap
             } else {
+                Log.w(TAG, "🖼️ 크롭 영역이 너무 작음: ${width}x${height}")
                 null
             }
         } catch (e: Exception) {
@@ -172,61 +310,119 @@ class ObjectDetectionManager(
         }
     }
 
-    private fun extractBusNumber(croppedBitmap: Bitmap) {
+    private fun extractBusNumber(croppedBitmap: Bitmap, busIndex: Int) {
         val image = InputImage.fromBitmap(croppedBitmap, 0)
+
+        Log.d(TAG, "📝 버스 #${busIndex} OCR 시작")
 
         textRecognizer.process(image)
             .addOnSuccessListener { visionText ->
-                val extractedText = visionText.text
-                Log.d(TAG, "📝 OCR 추출 텍스트: $extractedText")
+                val extractedText = visionText.text.trim()
+                Log.d(TAG, "📝 버스 #${busIndex} OCR 추출 텍스트: '$extractedText'")
 
-                val busNumber = parseBusNumberFromText(extractedText)
-                if (busNumber != null) {
-                    val message = "${busNumber}번 버스가 앞에 있습니다"
-                    textToSpeech.speak(message, TextToSpeech.QUEUE_ADD, null, "bus_number_ocr")
-                    Log.d(TAG, "🔊 버스 번호 음성: $message")
+                if (extractedText.isNotEmpty()) {
+                    val busNumber = parseBusNumberFromText(extractedText)
+                    if (busNumber != null) {
+                        if (busNumber != lastAnnouncedBusNumber) {
+                            val message = "${busNumber}번 버스가 앞에 있습니다"
+                            speakWithTest(message, "bus_number_ocr")
+                            lastAnnouncedBusNumber = busNumber
+                            Log.i(TAG, "✅ 버스 번호 OCR 인식 성공! '$extractedText' → $busNumber")
+                        } else {
+                            Log.d(TAG, "🔊 동일한 버스 번호 중복 방지: $busNumber")
+                        }
+                    } else {
+                        Log.w(TAG, "❌ 버스 #${busIndex} 유효한 번호 추출 실패: '$extractedText'")
+                    }
                 } else {
-                    Log.d(TAG, "❌ 버스 번호를 인식할 수 없습니다")
+                    Log.d(TAG, "❌ 버스 #${busIndex} OCR 텍스트 없음")
                 }
             }
             .addOnFailureListener { e ->
-                Log.e(TAG, "💥 OCR 실패", e)
+                Log.e(TAG, "💥 버스 #${busIndex} OCR 실패", e)
             }
     }
 
     private fun parseBusNumberFromText(text: String): String? {
         if (text.isBlank()) return null
 
-        // 버스 번호 추출 패턴들
+        val cleanedText = text
+            .replace(Regex("[^0-9가-힣a-zA-Z\\s번호호선라인버스]"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+
+        Log.d(TAG, "🧹 텍스트 정제: '$text' → '$cleanedText'")
+
         val patterns = listOf(
-            Regex("""\b(\d{1,4})\b"""),           // 1-4자리 숫자
-            Regex("""(\d{1,4})\s*번"""),          // 숫자 + 번
-            Regex("""번호\s*(\d{1,4})"""),        // 번호 + 숫자
-            Regex("""(\d{1,4})\s*호선"""),        // 숫자 + 호선
-            Regex("""(\d{1,4})\s*라인""")         // 숫자 + 라인
+            Regex("""(\d{1,4})\s*번\s*버스"""),
+            Regex("""버스\s*(\d{1,4})\s*번"""),
+            Regex("""(\d{1,4})\s*번"""),
+            Regex("""번호\s*(\d{1,4})"""),
+            Regex("""(\d{1,4})\s*호선"""),
+            Regex("""(\d{1,4})\s*라인"""),
+            Regex("""NO\s*(\d{1,4})""", RegexOption.IGNORE_CASE),
+            Regex("""(\d{1,4})\s*[번호]"""),
+            Regex("""\b(\d{1,4})\b""")
         )
 
-        for (pattern in patterns) {
-            val matches = pattern.findAll(text)
+        for ((index, pattern) in patterns.withIndex()) {
+            val matches = pattern.findAll(cleanedText)
             for (match in matches) {
                 val number = match.groupValues[1]
                 val numValue = number.toIntOrNull()
 
-                // 버스 번호 유효성 검사 (1~9999)
                 if (numValue != null && numValue in 1..9999) {
-                    Log.d(TAG, "✅ 버스 번호 발견: $number (원본: $text)")
+                    Log.d(TAG, "✅ 패턴 #${index + 1}에서 버스 번호 발견: $number")
                     return number
                 }
             }
         }
 
-        Log.d(TAG, "❌ 유효한 버스 번호 없음: $text")
+        Log.w(TAG, "❌ 버스 번호 추출 실패: '$cleanedText'")
         return null
     }
 
+    private fun announceNonBusObjects(detections: List<Detection>) {
+        // 버스 전용 모델이므로 일반 객체는 없음
+        // 이 함수는 호출되지 않아야 함
+        Log.d(TAG, "📝 버스 전용 모델 - 일반 객체 음성 안내 함수 호출됨 (비정상)")
+    }
+
+    private fun speakWithTest(message: String, utteranceId: String) {
+        Log.d(TAG, "🔊 음성 출력 시도: '$message' (ID: $utteranceId)")
+
+        try {
+            Log.d(TAG, "🔊 TTS 객체 상태: 사용 가능")
+
+            val result = textToSpeech.speak(message, TextToSpeech.QUEUE_ADD, null, utteranceId)
+
+            when (result) {
+                TextToSpeech.SUCCESS -> {
+                    Log.d(TAG, "✅ TTS 성공: $message")
+                }
+                TextToSpeech.ERROR -> {
+                    Log.e(TAG, "❌ TTS 오류: $message")
+                }
+                else -> {
+                    Log.w(TAG, "⚠️ TTS 알 수 없는 결과: $result")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 TTS 출력 중 예외 발생", e)
+        }
+    }
+
     private fun convertBitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
-        val byteBuffer = ByteBuffer.allocateDirect(4 * INPUT_SIZE * INPUT_SIZE * 3)
+        val byteBuffer = ByteBuffer.allocateDirect(INPUT_SIZE * INPUT_SIZE * 3)
         byteBuffer.order(ByteOrder.nativeOrder())
+
+        Log.d(TAG, "🔍 ByteBuffer 생성: ${INPUT_SIZE}x${INPUT_SIZE}x3 = ${INPUT_SIZE * INPUT_SIZE * 3} bytes (INT8)")
+        Log.d(TAG, "🔍 입력 비트맵 크기: ${bitmap.width}x${bitmap.height}")
+
+        if (bitmap.width != INPUT_SIZE || bitmap.height != INPUT_SIZE) {
+            Log.e(TAG, "❌ 비트맵 크기가 예상과 다름: ${bitmap.width}x${bitmap.height}")
+            return byteBuffer
+        }
 
         val intValues = IntArray(INPUT_SIZE * INPUT_SIZE)
         bitmap.getPixels(intValues, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
@@ -234,59 +430,84 @@ class ObjectDetectionManager(
         var pixel = 0
         for (i in 0 until INPUT_SIZE) {
             for (j in 0 until INPUT_SIZE) {
-                val pixelValue = intValues[pixel++]
+                if (pixel < intValues.size) {
+                    val pixelValue = intValues[pixel++]
 
-                // 정규화 (0~255 -> 0~1)
-                byteBuffer.putFloat(((pixelValue shr 16) and 0xFF) / 255.0f) // R
-                byteBuffer.putFloat(((pixelValue shr 8) and 0xFF) / 255.0f)  // G
-                byteBuffer.putFloat((pixelValue and 0xFF) / 255.0f)          // B
+                    val r = (pixelValue shr 16) and 0xFF
+                    val g = (pixelValue shr 8) and 0xFF
+                    val b = pixelValue and 0xFF
+
+                    byteBuffer.put(r.toByte())
+                    byteBuffer.put(g.toByte())
+                    byteBuffer.put(b.toByte())
+                } else {
+                    Log.e(TAG, "❌ 픽셀 인덱스 초과: $pixel >= ${intValues.size}")
+                    break
+                }
             }
         }
 
+        Log.d(TAG, "✅ ByteBuffer 생성 완료: ${byteBuffer.capacity()} bytes")
         return byteBuffer
     }
 
-    private fun parseModelOutput(output: Array<FloatArray>, originalWidth: Int, originalHeight: Int): List<Detection> {
+    private fun parseQuantizedModelOutput(
+        outputBuffer1: ByteBuffer,
+        outputBuffer2: ByteBuffer,
+        originalWidth: Int,
+        originalHeight: Int
+    ): List<Detection> {
         val detections = mutableListOf<Detection>()
 
-        for (i in output.indices) {
-            val detection = output[i]
-            val confidence = detection[4]
+        Log.d(TAG, "🔍 양자화 모델 출력 파싱 시작")
 
-            if (confidence > CONFIDENCE_THRESHOLD) {
-                // 바운딩 박스 좌표 (정규화된 값을 원본 크기로 변환)
-                val centerX = detection[0] * originalWidth
-                val centerY = detection[1] * originalHeight
-                val width = detection[2] * originalWidth
-                val height = detection[3] * originalHeight
+        outputBuffer1.rewind()
+        outputBuffer2.rewind()
 
-                val left = centerX - width / 2
-                val top = centerY - height / 2
-                val right = centerX + width / 2
-                val bottom = centerY + height / 2
+        try {
+            // 버스 전용 모델 출력 파싱 (클래스 1개)
+            for (i in 0 until minOf(NUM_DETECTIONS, outputBuffer1.capacity() / (NUM_CLASSES + 5))) {
+                val startIdx = i * (NUM_CLASSES + 5)  // 1 + 5 = 6 (x, y, w, h, conf, bus_class)
 
-                // 클래스 확률에서 최고 점수 클래스 찾기
-                var maxClassScore = 0f
-                var maxClassIndex = 0
-                for (j in 5 until detection.size) {
-                    val classScore = detection[j]
-                    if (classScore > maxClassScore) {
-                        maxClassScore = classScore
-                        maxClassIndex = j - 5
+                if (startIdx + 5 < outputBuffer1.capacity()) {
+                    val x = (outputBuffer1.get(startIdx).toInt() and 0xFF) / 255.0f
+                    val y = (outputBuffer1.get(startIdx + 1).toInt() and 0xFF) / 255.0f
+                    val w = (outputBuffer1.get(startIdx + 2).toInt() and 0xFF) / 255.0f
+                    val h = (outputBuffer1.get(startIdx + 3).toInt() and 0xFF) / 255.0f
+                    val confidence = (outputBuffer1.get(startIdx + 4).toInt() and 0xFF) / 255.0f
+
+                    if (confidence > CONFIDENCE_THRESHOLD) {
+                        // 버스 클래스 확률 (클래스 1개뿐)
+                        val busClassScore = (outputBuffer1.get(startIdx + 5).toInt() and 0xFF) / 255.0f
+
+                        val finalConfidence = confidence * busClassScore
+                        if (finalConfidence > CONFIDENCE_THRESHOLD) {
+                            // 좌표를 원본 이미지 크기로 변환
+                            val centerX = x * originalWidth
+                            val centerY = y * originalHeight
+                            val width = w * originalWidth
+                            val height = h * originalHeight
+
+                            val left = centerX - width / 2
+                            val top = centerY - height / 2
+                            val right = centerX + width / 2
+                            val bottom = centerY + height / 2
+
+                            val boundingBox = RectF(left, top, right, bottom)
+                            val label = "bus"  // 항상 버스
+
+                            detections.add(Detection(boundingBox, label, finalConfidence))
+
+                            Log.d(TAG, "🚌 버스 감지! 신뢰도: ${String.format("%.2f", finalConfidence)} 위치: (${left.toInt()}, ${top.toInt()}, ${right.toInt()}, ${bottom.toInt()})")
+                        }
                     }
                 }
-
-                val finalConfidence = confidence * maxClassScore
-                if (finalConfidence > CONFIDENCE_THRESHOLD && maxClassIndex < labels.size) {
-                    val boundingBox = RectF(left, top, right, bottom)
-                    val label = labels[maxClassIndex]
-
-                    detections.add(Detection(boundingBox, label, finalConfidence))
-                }
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "💥 커스텀 버스 모델 출력 파싱 오류", e)
         }
 
-        // NMS (Non-Maximum Suppression) 적용
+        Log.d(TAG, "🔍 커스텀 버스 모델 파싱 완료: ${detections.size}개 버스 감지")
         return applyNMS(detections)
     }
 
@@ -324,54 +545,21 @@ class ObjectDetectionManager(
         return if (unionArea > 0) intersectionArea / unionArea else 0f
     }
 
-    private fun announceNonBusObjects(detections: List<Detection>) {
-        val nonBusDetections = detections.filter { it.label != "bus" }
-
-        if (nonBusDetections.isEmpty()) {
-            return // 버스 외 객체가 없으면 음성 출력 안 함
-        }
-
-        // 신뢰도가 높은 객체들만 선택 (상위 2개, 버스 제외)
-        val topDetections = nonBusDetections.sortedByDescending { it.confidence }.take(2)
-
-        val objectNames = topDetections.map { detection ->
-            when (detection.label) {
-                "person" -> "사람"
-                "car" -> "자동차"
-                "truck" -> "트럭"
-                "bicycle" -> "자전거"
-                "motorcycle" -> "오토바이"
-                "traffic light" -> "신호등"
-                "stop sign" -> "정지 표지판"
-                "bench" -> "벤치"
-                "chair" -> "의자"
-                "dog" -> "개"
-                "cat" -> "고양이"
-                else -> detection.label
-            }
-        }.distinct()
-
-        if (objectNames.isNotEmpty()) {
-            val message = if (objectNames.size == 1) {
-                "앞에 ${objectNames[0]}이 있습니다"
-            } else {
-                "앞에 ${objectNames.joinToString(", ")}이 있습니다"
-            }
-
-            textToSpeech.speak(message, TextToSpeech.QUEUE_ADD, null, "object_detection")
-            Log.d(TAG, "🔊 일반 객체 음성: $message")
-        }
-    }
-
     fun drawDetections(bitmap: Bitmap, detections: List<Detection>): Bitmap {
         val mutableBitmap = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(mutableBitmap)
 
         for (detection in detections) {
-            // 바운딩 박스 그리기
+            if (detection.label == "bus") {
+                paint.color = Color.GREEN
+                paint.strokeWidth = 5f
+            } else {
+                paint.color = Color.RED
+                paint.strokeWidth = 3f
+            }
+
             canvas.drawRect(detection.boundingBox, paint)
 
-            // 라벨과 신뢰도 텍스트 그리기
             val text = "${detection.label} (${String.format("%.2f", detection.confidence)})"
             canvas.drawText(text, detection.boundingBox.left, detection.boundingBox.top - 10, paint)
         }

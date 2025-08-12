@@ -32,13 +32,14 @@ class CameraManager(
     // 객체 감지 매니저
     private var objectDetectionManager: ObjectDetectionManager? = null
 
-    // 감지 주기 제어
+    // 비동기 감지 제어
     private val detectionScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var isDetectionRunning = false
-    private val DETECTION_INTERVAL_MS = 3000L // 3초마다 객체 감지
+    private val DETECTION_INTERVAL_MS = 3000L // 3초 간격
 
     // 프레임 처리 제어
     private var isProcessingFrame = false
+    private var lastDetectionTime = 0L
 
     init {
         initializeObjectDetection()
@@ -51,8 +52,14 @@ class CameraManager(
         ) { detections ->
             // 감지 결과 콜백
             Log.d(TAG, "🔍 감지된 객체: ${detections.size}개")
+
+            val busCount = detections.count { it.label == "bus" }
+            if (busCount > 0) {
+                Log.d(TAG, "🚌 버스 ${busCount}개 감지됨 - OCR 진행 중")
+            }
         }
     }
+
     fun startCamera() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
 
@@ -60,7 +67,6 @@ class CameraManager(
             try {
                 cameraProvider = cameraProviderFuture.get()
                 bindCameraUseCases()
-                startObjectDetection()
                 Log.d(TAG, "📷 카메라 시작 성공")
             } catch (e: Exception) {
                 Log.e(TAG, "💥 카메라 시작 실패", e)
@@ -78,9 +84,9 @@ class CameraManager(
                 it.setSurfaceProvider(previewView.surfaceProvider)
             }
 
-        // 이미지 분석 설정 - 한 번만 설정
+        // 이미지 분석 설정
         imageAnalysis = ImageAnalysis.Builder()
-            .setTargetResolution(android.util.Size(640, 480)) // 해상도 지정
+            .setTargetResolution(android.util.Size(640, 480))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
             .also { analysis ->
@@ -93,10 +99,8 @@ class CameraManager(
         val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
         try {
-            // 기존 바인딩 해제
             cameraProvider.unbindAll()
 
-            // 카메라 바인딩
             cameraProvider.bindToLifecycle(
                 lifecycleOwner,
                 cameraSelector,
@@ -109,64 +113,106 @@ class CameraManager(
         }
     }
 
-    private fun startObjectDetection() {
-        if (isDetectionRunning) return
+    // 🚀 비동기 객체 감지 시작 (독립적인 스레드)
+    fun startAsyncObjectDetection() {
+        if (isDetectionRunning) {
+            Log.d(TAG, "🔍 객체 감지가 이미 실행 중입니다")
+            return
+        }
 
         isDetectionRunning = true
+        lastDetectionTime = 0L
 
         detectionScope.launch {
+            Log.d(TAG, "🚀 비동기 객체 감지 스레드 시작 (${DETECTION_INTERVAL_MS/1000}초 간격)")
+
             while (isDetectionRunning) {
                 try {
-                    // 3초마다 객체 감지 허용
                     delay(DETECTION_INTERVAL_MS)
-                    isProcessingFrame = false // 다음 프레임 처리 허용
 
+                    val currentTime = System.currentTimeMillis()
+                    Log.d(TAG, "⏰ 객체 감지 주기 도달 - 다음 프레임 처리 허용")
+
+                    // 프레임 처리 허용
+                    isProcessingFrame = false
+
+                } catch (e: CancellationException) {
+                    Log.d(TAG, "🔍 객체 감지 스레드 취소됨")
+                    break
                 } catch (e: Exception) {
-                    Log.e(TAG, "💥 객체 감지 중 오류", e)
+                    Log.e(TAG, "💥 객체 감지 스레드 오류", e)
                     delay(1000) // 에러 시 1초 대기
                 }
             }
+
+            Log.d(TAG, "🔍 비동기 객체 감지 스레드 종료")
         }
 
-        Log.d(TAG, "🔍 객체 감지 시작 (${DETECTION_INTERVAL_MS/1000}초 간격)")
+        // TTS 시작 안내
+        try {
+            textToSpeech.speak(
+                "3초마다 객체 감지를 시작합니다",
+                TextToSpeech.QUEUE_ADD,
+                null,
+                "detection_start"
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "TTS 오류", e)
+        }
     }
 
     private fun processImageProxy(imageProxy: ImageProxy) {
-        // 프레임 처리 중이면 스킵
-        if (isProcessingFrame) {
+        val currentTime = System.currentTimeMillis()
+
+        // 감지 주기 제어
+        if (isProcessingFrame || (currentTime - lastDetectionTime < DETECTION_INTERVAL_MS)) {
             imageProxy.close()
             return
         }
 
         try {
-            // ImageProxy를 Bitmap으로 변환
             val bitmap = imageProxyToBitmap(imageProxy)
 
             if (bitmap != null) {
-                isProcessingFrame = true // 프레임 처리 시작
+                isProcessingFrame = true
+                lastDetectionTime = currentTime
 
-                // 백그라운드 스레드에서 객체 감지 실행
+                Log.d(TAG, "🔍 객체 감지 실행 중... (${DETECTION_INTERVAL_MS/1000}초 간격)")
+
+                // 별도 코루틴에서 객체 감지 실행
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
-                        objectDetectionManager?.detectObjects(bitmap)
+                        val detections = objectDetectionManager?.detectObjects(bitmap)
+
+                        detections?.let { detectionList ->
+                            val busDetections = detectionList.filter { it.label == "bus" }
+                            if (busDetections.isNotEmpty()) {
+                                Log.d(TAG, "🚌 버스 감지 완료 - ${busDetections.size}대")
+                            } else {
+                                Log.d(TAG, "🔍 객체 감지 완료 - 버스 없음 (일반 객체: ${detectionList.size}개)")
+                            }
+                        }
+
                     } catch (e: Exception) {
-                        Log.e(TAG, "💥 객체 감지 실패", e)
+                        Log.e(TAG, "💥 객체 감지 실행 실패", e)
+                    } finally {
+                        Log.d(TAG, "✅ 객체 감지 완료 - 다음 감지까지 ${DETECTION_INTERVAL_MS/1000}초 대기")
                     }
                 }
             }
 
         } catch (e: Exception) {
             Log.e(TAG, "💥 프레임 분석 실패", e)
+            isProcessingFrame = false
         } finally {
             imageProxy.close()
         }
     }
 
-    // ✅ 수정된 ImageProxy to Bitmap 변환 함수
     private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
         return try {
-            val yBuffer = imageProxy.planes[0].buffer // Y
-            val vuBuffer = imageProxy.planes[2].buffer // VU
+            val yBuffer = imageProxy.planes[0].buffer
+            val vuBuffer = imageProxy.planes[2].buffer
 
             val ySize = yBuffer.remaining()
             val vuSize = vuBuffer.remaining()
@@ -178,7 +224,7 @@ class CameraManager(
 
             val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
             val out = ByteArrayOutputStream()
-            yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 50, out)
+            yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 75, out)
             val imageBytes = out.toByteArray()
 
             android.graphics.BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
@@ -186,7 +232,7 @@ class CameraManager(
         } catch (e: Exception) {
             Log.e(TAG, "💥 Bitmap 변환 실패", e)
 
-            // 대안: 간단한 RGB 변환 (품질은 낮지만 작동함)
+            // 대안: 간단한 RGB 변환
             try {
                 val bitmap = Bitmap.createBitmap(
                     imageProxy.width,
@@ -194,7 +240,6 @@ class CameraManager(
                     Bitmap.Config.ARGB_8888
                 )
 
-                // YUV_420_888을 간단하게 RGB로 변환
                 val yBuffer = imageProxy.planes[0].buffer
                 val yPixelStride = imageProxy.planes[0].pixelStride
                 val yRowStride = imageProxy.planes[0].rowStride
@@ -207,7 +252,6 @@ class CameraManager(
                         val yIndex = y * yRowStride + x * yPixelStride
                         if (yIndex < yBuffer.capacity()) {
                             val yValue = yBuffer.get(yIndex).toInt() and 0xFF
-                            // Y 값을 그레이스케일로 변환
                             val grayValue = yValue
                             val rgb = (0xFF shl 24) or (grayValue shl 16) or (grayValue shl 8) or grayValue
                             pixels[pixelIndex++] = rgb
@@ -238,7 +282,7 @@ class CameraManager(
 
     fun resumeDetection() {
         if (!isDetectionRunning) {
-            startObjectDetection()
+            startAsyncObjectDetection()
             Log.d(TAG, "▶️ 객체 감지 재시작")
         }
     }

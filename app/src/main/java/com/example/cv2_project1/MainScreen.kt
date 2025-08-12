@@ -22,12 +22,12 @@ import androidx.camera.view.PreviewView
 fun MainScreen(
     activity: ComponentActivity,
     onCameraManagerReady: (CameraManager) -> Unit,
-    onSpeechManagerReady: ((String) -> Unit, (Boolean) -> Unit) -> Unit // 결과 콜백, 상태 콜백
+    onSpeechManagerReady: ((String) -> Unit, (Boolean) -> Unit) -> Unit
 ) {
     var speechResult by remember { mutableStateOf("버스 번호를 말씀해주세요") }
     var isListening by remember { mutableStateOf(false) }
     var speechCompleted by remember { mutableStateOf(false) }
-    var objectDetectionStatus by remember { mutableStateOf("객체 감지 대기 중") }
+    var isAsyncServicesActive by remember { mutableStateOf(false) }
 
     var cameraManager: CameraManager? by remember { mutableStateOf(null) }
 
@@ -36,16 +36,17 @@ fun MainScreen(
         onSpeechManagerReady(
             { result ->
                 speechResult = result
-                speechCompleted = true // 음성 인식 완료
-                objectDetectionStatus = "객체 감지 시작됨"
-            }, // 결과 콜백
-            { listening -> isListening = listening } // 상태 콜백
+                speechCompleted = true
+                isAsyncServicesActive = true
+            },
+            { listening -> isListening = listening }
         )
     }
 
     // 상태에 따른 UI 업데이트
     val statusText = when {
-        speechCompleted -> "버스 모니터링 & 객체 감지 실행 중"
+        isAsyncServicesActive -> "🚀 비동기 서비스 실행 중 - 카메라 감지 & 서버 모니터링"
+        speechCompleted -> "위치 정보 전송 중..."
         isListening -> "버스 번호를 말씀해주세요..."
         else -> "음성 인식 준비 중..."
     }
@@ -55,11 +56,11 @@ fun MainScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
-        // 카메라 미리보기 영역 (상단 60%)
+        // 카메라 미리보기 영역 (상단 65%)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(0.6f)
+                .weight(0.65f)
         ) {
             AndroidView(
                 factory = { context ->
@@ -67,7 +68,6 @@ fun MainScreen(
                         if (ContextCompat.checkSelfPermission(activity, android.Manifest.permission.CAMERA)
                             == PackageManager.PERMISSION_GRANTED) {
 
-                            // 향상된 CameraManager 생성 (객체 감지 포함)
                             val manager = CameraManager(
                                 context = activity,
                                 lifecycleOwner = activity,
@@ -87,8 +87,64 @@ fun MainScreen(
                 modifier = Modifier.fillMaxSize()
             )
 
-            // 객체 감지 상태 오버레이
-            if (speechCompleted) {
+            // 비동기 서비스 상태 오버레이
+            if (isAsyncServicesActive) {
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xAA4CAF50) // 초록색 - 활성 상태
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "🚀 비동기 실행",
+                        color = Color.White,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+
+                // 카메라 감지 상태 (우상단)
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xAA9C27B0) // 보라색
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "🔍 3초 감지",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(8.dp)
+                    )
+                }
+
+                // 서버 모니터링 상태 (중앙 하단)
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xAAFF5722) // 주황색
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        text = "📡 서버 모니터링 (30초)",
+                        color = Color.White,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            } else if (speechCompleted) {
+                // 객체 감지 대기 상태
                 Card(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
@@ -99,7 +155,7 @@ fun MainScreen(
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Text(
-                        text = "🔍 객체 감지 중",
+                        text = "🔍 감지 준비",
                         color = Color.White,
                         fontSize = 12.sp,
                         modifier = Modifier.padding(8.dp)
@@ -108,11 +164,11 @@ fun MainScreen(
             }
         }
 
-        // 정보 영역 (하단 40%)
+        // 정보 영역 (하단 35%)
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(0.4f)
+                .weight(0.35f)
                 .background(Color(0xFF2C2C2C))
                 .padding(16.dp),
             verticalArrangement = Arrangement.SpaceEvenly,
@@ -134,7 +190,12 @@ fun MainScreen(
                     .fillMaxWidth()
                     .height(80.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = if (speechCompleted) Color(0xFF1976D2) else Color(0xFF404040)
+                    containerColor = when {
+                        isAsyncServicesActive -> Color(0xFF1976D2) // 파란색 - 비동기 실행
+                        speechCompleted -> Color(0xFF4CAF50) // 초록색 - 완료
+                        isListening -> Color(0xFFFF5722) // 주황색 - 듣는 중
+                        else -> Color(0xFF404040) // 회색 - 대기
+                    }
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
@@ -148,13 +209,23 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = if (speechCompleted) "🚌" else "🎤",
+                            text = when {
+                                isAsyncServicesActive -> "🚀"
+                                speechCompleted -> "🚌"
+                                isListening -> "🎤"
+                                else -> "⏳"
+                            },
                             fontSize = 24.sp,
                             modifier = Modifier.padding(end = 12.dp)
                         )
                         Column {
                             Text(
-                                text = if (speechCompleted) "버스 모니터링" else "음성 인식",
+                                text = when {
+                                    isAsyncServicesActive -> "비동기 서비스 실행"
+                                    speechCompleted -> "버스 모니터링"
+                                    isListening -> "음성 인식 중"
+                                    else -> "준비 중"
+                                },
                                 color = Color.White,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Medium
@@ -183,9 +254,9 @@ fun MainScreen(
                         .padding(end = 4.dp),
                     colors = CardDefaults.cardColors(
                         containerColor = when {
-                            speechCompleted -> Color(0xFF4CAF50)
-                            isListening -> Color(0xFFFF5722)
-                            else -> Color(0xFF666666)
+                            speechCompleted -> Color(0xFF4CAF50) // 완료
+                            isListening -> Color(0xFFFF5722) // 듣는 중
+                            else -> Color(0xFF666666) // 대기
                         }
                     ),
                     shape = RoundedCornerShape(25.dp)
@@ -196,9 +267,9 @@ fun MainScreen(
                     ) {
                         Text(
                             text = when {
-                                speechCompleted -> "✅ 완료"
-                                isListening -> "🎤 듣는중"
-                                else -> "⏳ 대기"
+                                speechCompleted -> " 완료"
+                                isListening -> "음성 듣는중"
+                                else -> " 대기"
                             },
                             color = Color.White,
                             fontSize = 12.sp,
@@ -207,14 +278,14 @@ fun MainScreen(
                     }
                 }
 
-                // 객체 감지 상태
+                // 카메라 감지 상태
                 Card(
                     modifier = Modifier
                         .weight(1f)
                         .height(50.dp)
-                        .padding(start = 4.dp),
+                        .padding(horizontal = 2.dp),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (speechCompleted) Color(0xFF9C27B0) else Color(0xFF666666)
+                        containerColor = if (isAsyncServicesActive) Color(0xFF9C27B0) else Color(0xFF666666)
                     ),
                     shape = RoundedCornerShape(25.dp)
                 ) {
@@ -223,10 +294,60 @@ fun MainScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
-                            text = if (speechCompleted) "🔍 감지중" else "⏸️ 대기",
+                            text = if (isAsyncServicesActive) " 감지중" else " 대기",
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+
+                // 서버 모니터링 상태
+                Card(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(50.dp)
+                        .padding(start = 4.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isAsyncServicesActive) Color(0xFFFF5722) else Color(0xFF666666)
+                    ),
+                    shape = RoundedCornerShape(25.dp)
+                ) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = if (isAsyncServicesActive) " 30초" else "️ 대기",
+                            color = Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // 비동기 서비스 상태 표시
+            if (isAsyncServicesActive) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF424242)
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "• 카메라: 3초마다 객체 감지\n• 서버: 30초마다 버스 도착 정보",
+                            color = Color(0xFFB0BEC5),
+                            fontSize = 10.sp,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(top = 4.dp)
                         )
                     }
                 }
