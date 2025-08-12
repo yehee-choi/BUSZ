@@ -29,8 +29,17 @@ class WebSocketManager(private val context: Context) {
     // 연결 상태 콜백
     private var onConnectionStatusChanged: ((Boolean) -> Unit)? = null
 
-    // 음성 출력 콜백
+    // 음성 출력 콜백 (🔊 버스 도착 시간 안내 포함)
     private var onVoiceOutputCallback: ((String) -> Unit)? = null
+
+    // 🔥 버스 없을 때 콜백
+    private var onBusNotFoundCallback: (() -> Unit)? = null
+
+    // 🔥 버스 찾았을 때 콜백
+    private var onBusFoundCallback: (() -> Unit)? = null
+
+    // 🔥 재시도 제어
+    private var busNotFoundCallbackUsed = false
 
     // 비동기 응답 처리를 위한 코루틴 스코프
     private val responseScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -38,12 +47,25 @@ class WebSocketManager(private val context: Context) {
     // 서버 URL
     private val serverUrl = "https://driven-sweeping-sheep.ngrok-free.app"
 
-    fun connect(onStatusChanged: (Boolean) -> Unit = {}, onVoiceOutput: ((String) -> Unit)? = null) {
+    fun connect(
+        onStatusChanged: (Boolean) -> Unit = {},
+        onVoiceOutput: ((String) -> Unit)? = null,
+        onBusNotFound: (() -> Unit)? = null,  // 🔥 버스 없을 때
+        onBusFound: (() -> Unit)? = null      // 🔥 버스 찾았을 때
+    ) {
         Log.d(TAG, "🔌 Socket.IO 연결 시작")
         Log.d(TAG, "🔌 서버 URL: $serverUrl")
 
+        // 🔍 콜백 저장 상태 디버깅
         onConnectionStatusChanged = onStatusChanged
         onVoiceOutputCallback = onVoiceOutput
+        onBusNotFoundCallback = onBusNotFound
+        onBusFoundCallback = onBusFound
+
+        Log.d(TAG, "🔍 콜백 등록 상태:")
+        Log.d(TAG, "  - onVoiceOutputCallback: ${if (onVoiceOutput != null) "등록됨" else "null"}")
+        Log.d(TAG, "  - onBusNotFoundCallback: ${if (onBusNotFound != null) "등록됨" else "null"}")
+        Log.d(TAG, "  - onBusFoundCallback: ${if (onBusFound != null) "등록됨" else "null"}")
 
         if (isConnected) {
             Log.d(TAG, "이미 소켓에 연결되어 있습니다")
@@ -98,6 +120,7 @@ class WebSocketManager(private val context: Context) {
 
         // 🚀 실시간 버스 위치 업데이트 수신 (30초마다 - 비동기 처리)
         socket.on("bus_update") { args ->
+            Log.d(TAG, "📡 bus_update 이벤트 수신됨!")
             handleBusUpdateAsync(args)
         }
 
@@ -154,27 +177,39 @@ class WebSocketManager(private val context: Context) {
                     sessionId = newSessionId
                     Log.d(TAG, "💾 세션 ID 업데이트: $sessionId")
                 }
+
+                // 🔥 새로운 모니터링 시작 시 재시도 플래그 초기화
+                busNotFoundCallbackUsed = false
+
             } catch (e: Exception) {
                 Log.e(TAG, "버스 모니터링 시작 응답 파싱 오류", e)
             }
         }
     }
 
-    // 🚀 비동기 버스 업데이트 처리 (30초마다 서버에서 자동 전송)
+    // 🚀 비동기 버스 업데이트 처리 (30초마다 서버에서 자동 전송) - 디버깅 강화
     private fun handleBusUpdateAsync(args: Array<Any>) {
-        // 별도 코루틴에서 처리하여 메인 스레드 블로킹 방지
         responseScope.launch {
             try {
+                Log.d(TAG, "🚨 === 서버 응답 디버깅 시작 ===")
+
                 if (args.isNotEmpty()) {
                     val response = args[0] as JSONObject
 
-                    // 전체 JSON 응답 로그
-                    Log.d(TAG, "📋 서버 응답 JSON: $response")
+                    // 🔍 상세 디버깅 로그
+                    Log.d(TAG, "📋 전체 JSON 응답: $response")
 
                     val timestamp = response.optString("timestamp", "")
                     val busFound = response.optBoolean("bus_found", false)
-                    val stationName = response.optString("station_name", "")
                     val busNumber = response.optString("bus_number", "")
+                    val message = response.optString("message", "")
+                    val stationName = response.optString("station_name", "")
+
+                    Log.d(TAG, "🔍 timestamp: '$timestamp'")
+                    Log.d(TAG, "🔍 bus_found: $busFound")
+                    Log.d(TAG, "🔍 bus_number: '$busNumber'")
+                    Log.d(TAG, "🔍 message: '$message'")
+                    Log.d(TAG, "🔍 station_name: '$stationName'")
 
                     Log.d(TAG, "📍 버스 위치 업데이트 수신 [$timestamp]")
                     Log.d(TAG, "📍 정류장: $stationName, 버스: ${busNumber}번")
@@ -183,11 +218,28 @@ class WebSocketManager(private val context: Context) {
                     saveJsonToFileAsync(response)
 
                     if (busFound) {
+                        Log.d(TAG, "✅ 버스 발견됨 - handleBusFoundResponse 호출")
+
+                        // 🔍 도착 시간 정보 추가 디버깅
+                        val arrivalTime = response.optInt("arrival_time", 0)
+                        val arrivalTimeFormatted = response.optString("arrival_time_formatted", "")
+                        val remainingStations = response.optInt("remaining_stations", 0)
+
+                        Log.d(TAG, "⏰ arrival_time: ${arrivalTime}초")
+                        Log.d(TAG, "⏰ arrival_time_formatted: '$arrivalTimeFormatted'")
+                        Log.d(TAG, "🚏 remaining_stations: $remainingStations")
+
                         handleBusFoundResponse(response)
                     } else {
+                        Log.w(TAG, "❌ 버스 발견되지 않음 - handleBusNotFoundResponse 호출")
                         handleBusNotFoundResponse(response)
                     }
+                } else {
+                    Log.e(TAG, "💥 서버 응답이 비어있음!")
                 }
+
+                Log.d(TAG, "🚨 === 서버 응답 디버깅 종료 ===")
+
             } catch (e: Exception) {
                 Log.e(TAG, "💥 비동기 버스 업데이트 처리 오류", e)
                 Log.e(TAG, "💥 원본 데이터: ${if (args.isNotEmpty()) args[0] else "빈 배열"}")
@@ -195,43 +247,116 @@ class WebSocketManager(private val context: Context) {
         }
     }
 
+    // 🚌⏰ 버스 발견 시 도착 시간 안내 - 디버깅 강화
     private suspend fun handleBusFoundResponse(response: JSONObject) {
-        val arrivalTime = response.optInt("arrival_time", 0)
-        val arrivalTimeFormatted = response.optString("arrival_time_formatted", "")
-        val remainingStations = response.optInt("remaining_stations", 0)
-        val vehicleType = response.optString("vehicle_type", "")
-        val routeType = response.optString("route_type", "")
+        Log.d(TAG, "🚨 === handleBusFoundResponse 시작 ===")
+
+        val arrivalTime = response.optInt("arrival_time", 0)                    // 초 단위
+        val arrivalTimeFormatted = response.optString("arrival_time_formatted", "") // "5분 30초"
+        val remainingStations = response.optInt("remaining_stations", 0)        // 남은 정류장 수
+        val vehicleType = response.optString("vehicle_type", "")                // 차량 타입
+        val routeType = response.optString("route_type", "")                    // 노선 타입
+        val stationName = response.optString("station_name", "")                // 정류장 이름
+        val busNumber = response.optString("bus_number", "")                    // 버스 번호
 
         Log.d(TAG, "✅ 버스 발견!")
         Log.d(TAG, "⏰ 도착 예정: $arrivalTimeFormatted (${arrivalTime}초)")
         Log.d(TAG, "🚏 남은 정류장: ${remainingStations}개")
         Log.d(TAG, "🚌 차량 정보: $vehicleType ($routeType)")
+        Log.d(TAG, "📍 현재 정류장: $stationName")
 
-        // 🔊 음성 출력 (메인 스레드에서 실행)
-        val voiceMessage = when {
-            arrivalTime <= 60 -> "버스가 곧 도착합니다. 1분 이내에 도착 예정입니다."
-            arrivalTime <= 300 -> "버스가 ${arrivalTimeFormatted} 후에 도착합니다."
-            else -> "버스가 ${arrivalTimeFormatted} 후에 도착 예정입니다."
+        // 🔥 버스 찾았을 때 콜백 호출 (카메라 시작)
+        withContext(Dispatchers.Main) {
+            Log.d(TAG, "📷 카메라 시작 콜백 호출")
+            if (onBusFoundCallback != null) {
+                Log.d(TAG, "✅ onBusFoundCallback 존재함 - 호출")
+                onBusFoundCallback?.invoke()
+            } else {
+                Log.e(TAG, "❌ onBusFoundCallback이 null!")
+            }
         }
+
+        // 🔊 상세한 도착 시간 음성 안내
+        Log.d(TAG, "🔊 TTS 메시지 생성 중...")
+
+        val voiceMessage = when {
+            arrivalTime <= 60 -> {
+                "🚨 ${busNumber}번 버스가 곧 도착합니다! 1분 이내에 도착 예정입니다."
+            }
+            arrivalTime <= 180 -> {
+                "${busNumber}번 버스가 ${arrivalTimeFormatted} 후에 도착합니다. ${remainingStations}개 정류장 남았습니다."
+            }
+            arrivalTime <= 600 -> {
+                "${busNumber}번 버스가 ${arrivalTimeFormatted} 후에 도착 예정입니다. 조금 더 기다려주세요."
+            }
+            else -> {
+                "${busNumber}번 버스가 ${arrivalTimeFormatted} 후에 도착 예정입니다. 시간이 많이 남았습니다."
+            }
+        }
+
+        Log.d(TAG, "🔊 생성된 TTS 메시지: '$voiceMessage'")
 
         withContext(Dispatchers.Main) {
-            onVoiceOutputCallback?.invoke(voiceMessage)
-            Log.d(TAG, "🔊 음성 출력: $voiceMessage")
+            Log.d(TAG, "🔊 TTS 콜백 호출 시작")
+
+            if (onVoiceOutputCallback != null) {
+                Log.d(TAG, "✅ onVoiceOutputCallback 존재함 - TTS 호출")
+                onVoiceOutputCallback?.invoke(voiceMessage)
+                Log.d(TAG, "✅ TTS 콜백 호출 완료")
+            } else {
+                Log.e(TAG, "❌ onVoiceOutputCallback이 null!")
+            }
         }
+
+        Log.d(TAG, "🚨 === handleBusFoundResponse 종료 ===")
     }
 
     private suspend fun handleBusNotFoundResponse(response: JSONObject) {
+        Log.d(TAG, "🚨 === handleBusNotFoundResponse 시작 ===")
+
         val message = response.optString("message", "")
+        val busNumber = response.optString("bus_number", "")
+
         Log.w(TAG, "❌ 버스 발견되지 않음")
         Log.w(TAG, "❌ 서버 메시지: $message")
+        Log.w(TAG, "❌ 요청한 버스 번호: $busNumber")
 
-        // 🔊 음성 출력 (메인 스레드에서 실행)
-        val voiceMessage = "현재 운행 중인 버스가 없습니다."
+        // 🔥 첫 번째 버스 없음 응답일 때만 재시도 콜백 호출
+        if (!busNotFoundCallbackUsed) {
+            busNotFoundCallbackUsed = true
+            Log.d(TAG, "🔄 첫 번째 버스 없음 - 재시도 콜백 호출")
 
-        withContext(Dispatchers.Main) {
-            onVoiceOutputCallback?.invoke(voiceMessage)
-            Log.d(TAG, "🔊 음성 출력: $voiceMessage")
+            withContext(Dispatchers.Main) {
+                if (onBusNotFoundCallback != null) {
+                    Log.d(TAG, "✅ onBusNotFoundCallback 존재함 - 재시도 호출")
+                    onBusNotFoundCallback?.invoke()
+                } else {
+                    Log.e(TAG, "❌ onBusNotFoundCallback이 null!")
+                }
+            }
+        } else {
+            // 🔊 재시도 후에도 버스 없을 때는 일반 음성 출력
+            Log.d(TAG, "🔊 재시도 후에도 버스 없음 - 일반 음성 출력")
+
+            val voiceMessage = if (busNumber.isNotEmpty()) {
+                "${busNumber}번 버스는 현재 운행하지 않거나 해당 지역에 없습니다."
+            } else {
+                "현재 운행 중인 버스가 없습니다."
+            }
+
+            Log.d(TAG, "🔊 버스 없음 TTS 메시지: '$voiceMessage'")
+
+            withContext(Dispatchers.Main) {
+                if (onVoiceOutputCallback != null) {
+                    Log.d(TAG, "✅ 버스 없음 TTS 호출")
+                    onVoiceOutputCallback?.invoke(voiceMessage)
+                } else {
+                    Log.e(TAG, "❌ onVoiceOutputCallback이 null!")
+                }
+            }
         }
+
+        Log.d(TAG, "🚨 === handleBusNotFoundResponse 종료 ===")
     }
 
     private fun handleBusMonitoringStopped(args: Array<Any>) {
@@ -270,8 +395,9 @@ class WebSocketManager(private val context: Context) {
         busNumber: String,
         interval: Int = 30
     ): Boolean {
-        Log.d(TAG, "📤 sendBusLocationRequest 호출됨")
+        Log.d(TAG, "📤 === sendBusLocationRequest 시작 ===")
         Log.d(TAG, "📤 연결 상태: $isConnected")
+        Log.d(TAG, "📤 소켓 초기화 상태: ${if (::socket.isInitialized) "초기화됨" else "초기화 안됨"}")
 
         if (!isConnected || !::socket.isInitialized) {
             Log.w(TAG, "⚠️ 소켓이 연결되지 않았습니다")
@@ -294,6 +420,7 @@ class WebSocketManager(private val context: Context) {
 
             Log.d(TAG, "✅ 버스 모니터링 요청 전송 성공!")
             Log.d(TAG, "🔄 서버에서 ${interval}초마다 자동으로 bus_update 이벤트 전송 시작")
+            Log.d(TAG, "📤 === sendBusLocationRequest 종료 ===")
 
             true
 

@@ -35,7 +35,9 @@ class CameraManager(
     // 비동기 감지 제어
     private val detectionScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var isDetectionRunning = false
-    private val DETECTION_INTERVAL_MS = 3000L // 3초 간격
+
+    // 🚀 시각장애인을 위한 빠른 감지 간격
+    private val DETECTION_INTERVAL_MS = 1500L // 1.5초 간격 (기존 3초 → 1.5초)
 
     // 프레임 처리 제어
     private var isProcessingFrame = false
@@ -55,7 +57,7 @@ class CameraManager(
 
             val busCount = detections.count { it.label == "bus" }
             if (busCount > 0) {
-                Log.d(TAG, "🚌 버스 ${busCount}개 감지됨 - OCR 진행 중")
+                Log.d(TAG, "🚌 버스 ${busCount}개 감지됨 - 빠른 OCR 진행 중")
             }
         }
     }
@@ -113,7 +115,7 @@ class CameraManager(
         }
     }
 
-    // 🚀 비동기 객체 감지 시작 (독립적인 스레드)
+    // 🚀 빠른 비동기 객체 감지 시작
     fun startAsyncObjectDetection() {
         if (isDetectionRunning) {
             Log.d(TAG, "🔍 객체 감지가 이미 실행 중입니다")
@@ -124,14 +126,14 @@ class CameraManager(
         lastDetectionTime = 0L
 
         detectionScope.launch {
-            Log.d(TAG, "🚀 비동기 객체 감지 스레드 시작 (${DETECTION_INTERVAL_MS/1000}초 간격)")
+            Log.d(TAG, "🚀 빠른 객체 감지 시작 (${DETECTION_INTERVAL_MS/1000.0}초 간격)")
 
             while (isDetectionRunning) {
                 try {
                     delay(DETECTION_INTERVAL_MS)
 
                     val currentTime = System.currentTimeMillis()
-                    Log.d(TAG, "⏰ 객체 감지 주기 도달 - 다음 프레임 처리 허용")
+                    Log.d(TAG, "⏰ 빠른 객체 감지 주기 도달 - 다음 프레임 처리 허용")
 
                     // 프레임 처리 허용
                     isProcessingFrame = false
@@ -141,20 +143,20 @@ class CameraManager(
                     break
                 } catch (e: Exception) {
                     Log.e(TAG, "💥 객체 감지 스레드 오류", e)
-                    delay(1000) // 에러 시 1초 대기
+                    delay(500) // 에러 시 0.5초 대기 (기존 1초 → 0.5초)
                 }
             }
 
-            Log.d(TAG, "🔍 비동기 객체 감지 스레드 종료")
+            Log.d(TAG, "🔍 빠른 객체 감지 스레드 종료")
         }
 
         // TTS 시작 안내
         try {
             textToSpeech.speak(
-                "3초마다 객체 감지를 시작합니다",
+                "1.5초마다 빠른 버스 감지를 시작합니다",
                 TextToSpeech.QUEUE_ADD,
                 null,
-                "detection_start"
+                "fast_detection_start"
             )
         } catch (e: Exception) {
             Log.e(TAG, "TTS 오류", e)
@@ -164,7 +166,7 @@ class CameraManager(
     private fun processImageProxy(imageProxy: ImageProxy) {
         val currentTime = System.currentTimeMillis()
 
-        // 감지 주기 제어
+        // 🚀 빠른 감지 주기 제어
         if (isProcessingFrame || (currentTime - lastDetectionTime < DETECTION_INTERVAL_MS)) {
             imageProxy.close()
             return
@@ -177,7 +179,7 @@ class CameraManager(
                 isProcessingFrame = true
                 lastDetectionTime = currentTime
 
-                Log.d(TAG, "🔍 객체 감지 실행 중... (${DETECTION_INTERVAL_MS/1000}초 간격)")
+                Log.d(TAG, "🔍 빠른 객체 감지 실행 중... (${DETECTION_INTERVAL_MS/1000.0}초 간격)")
 
                 // 별도 코루틴에서 객체 감지 실행
                 CoroutineScope(Dispatchers.IO).launch {
@@ -187,16 +189,16 @@ class CameraManager(
                         detections?.let { detectionList ->
                             val busDetections = detectionList.filter { it.label == "bus" }
                             if (busDetections.isNotEmpty()) {
-                                Log.d(TAG, "🚌 버스 감지 완료 - ${busDetections.size}대")
+                                Log.d(TAG, "🚌 빠른 버스 감지 완료 - ${busDetections.size}대")
                             } else {
-                                Log.d(TAG, "🔍 객체 감지 완료 - 버스 없음 (일반 객체: ${detectionList.size}개)")
+                                Log.d(TAG, "🔍 빠른 객체 감지 완료 - 버스 없음 (일반 객체: ${detectionList.size}개)")
                             }
                         }
 
                     } catch (e: Exception) {
                         Log.e(TAG, "💥 객체 감지 실행 실패", e)
                     } finally {
-                        Log.d(TAG, "✅ 객체 감지 완료 - 다음 감지까지 ${DETECTION_INTERVAL_MS/1000}초 대기")
+                        Log.d(TAG, "✅ 빠른 객체 감지 완료 - 다음 감지까지 ${DETECTION_INTERVAL_MS/1000.0}초 대기")
                     }
                 }
             }
@@ -277,13 +279,13 @@ class CameraManager(
 
     fun pauseDetection() {
         isDetectionRunning = false
-        Log.d(TAG, "⏸️ 객체 감지 일시정지")
+        Log.d(TAG, "⏸️ 빠른 객체 감지 일시정지")
     }
 
     fun resumeDetection() {
         if (!isDetectionRunning) {
             startAsyncObjectDetection()
-            Log.d(TAG, "▶️ 객체 감지 재시작")
+            Log.d(TAG, "▶️ 빠른 객체 감지 재시작")
         }
     }
 
